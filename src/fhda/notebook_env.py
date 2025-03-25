@@ -125,6 +125,7 @@ class NBEnvironment(Environment[NBEnvironmentState]):
         use_tmp_work_dir: bool = True,
         language: utils.NBLanguage = utils.NBLanguage.PYTHON,
         allow_download_from_gcs: bool = False,
+        allow_package_installation: bool = False,
     ):
         """Initialize a notebook environment.
 
@@ -139,6 +140,8 @@ class NBEnvironment(Environment[NBEnvironmentState]):
             allow_download_from_gcs: If True, the environment will expose a tool to download
                 directories from the aviary-storage GCS bucket. Should only be enabled if the
                 task requires data on GCS. Disabled by default.
+            allow_package_installation: If True, the environment will expose a tool to install
+                Python packages using pip. This is disabled by default for security reasons.
         """
         self.work_dir = Path(work_dir)
         self.nb_path = Path(nb_path) if nb_path else self.work_dir / self.NOTEBOOK_NAME
@@ -146,6 +149,7 @@ class NBEnvironment(Environment[NBEnvironmentState]):
         self.use_tmp_work_dir = use_tmp_work_dir
         self.language = language
         self.allow_download_from_gcs = allow_download_from_gcs
+        self.allow_package_installation = allow_package_installation
         self.use_docker = cfg.USE_DOCKER
 
     async def reset(self) -> tuple[Messages, list[Tool]]:
@@ -164,6 +168,8 @@ class NBEnvironment(Environment[NBEnvironmentState]):
         ]
         if self.allow_download_from_gcs:
             self.tools.append(Tool.from_function(self.download_from_bucket))
+        if self.allow_package_installation:
+            self.tools.append(Tool.from_function(self.install_package))
 
         init_obs = cast(Messages, [self.get_env_state_msg()])
 
@@ -267,6 +273,77 @@ class NBEnvironment(Environment[NBEnvironmentState]):
         self.state.answer = answer
         logger.info("Answer submitted: %s", answer)
         return "Answer submitted. Episode ended."
+        
+    async def install_package(self, package_name: str, version: str = None) -> str:
+        """Install a Python package using pip.
+        
+        This tool allows installing packages that are missing from the environment
+        to avoid module import errors during data analysis.
+        
+        Args:
+            package_name: The name of the package to install
+            version: Optional specific version to install (e.g., "1.2.3")
+        
+        Returns:
+            A message indicating the result of the installation attempt
+        """
+        # Security: Check against an allowlist of common data science packages
+        # This helps prevent malicious package installations
+        ALLOWED_PACKAGES = {
+            # Data manipulation
+            "pandas", "numpy", "scipy", "pyarrow", "polars", "dask", "vaex",
+            # Visualization
+            "matplotlib", "seaborn", "plotly", "bokeh", "altair", 
+            # Machine learning
+            "scikit-learn", "xgboost", "lightgbm", "catboost", "statsmodels",
+            # Deep learning
+            "tensorflow", "torch", "keras", "transformers",
+            # NLP
+            "nltk", "spacy", "gensim", "textblob",
+            # Image processing
+            "pillow", "opencv-python", "scikit-image",
+            # Geospatial
+            "geopandas", "folium", "shapely", "pyproj", "rasterio",
+            # Time series
+            "prophet", "pmdarima", "statsmodels",
+            # Other data science
+            "networkx", "pydot", "graphviz", "beautifulsoup4", "requests",
+        }
+        
+        if package_name.lower() not in ALLOWED_PACKAGES:
+            return f"Error: Package '{package_name}' is not in the allowlist of permitted packages. For security reasons, only common data science packages can be installed."
+        
+        if not self.use_docker:
+            return "Error: Package installation is only supported in Docker mode"
+        
+        try:
+            # Build pip command
+            pip_cmd = ["pip", "install", "-U"]
+            if version:
+                package_spec = f"{package_name}=={version}"
+            else:
+                package_spec = package_name
+            pip_cmd.append(package_spec)
+            
+            logger.info(f"Installing package: {package_spec}")
+            
+            # Run pip install in the container
+            exit_code = await self._exec_cmd(pip_cmd)
+            
+            if exit_code != 0:
+                return f"Error: Failed to install {package_spec} (exit code: {exit_code})"
+            
+            # Verify installation by importing the package
+            verify_cmd = ["python", "-c", f"import {package_name.split('[')[0]}; print(f'Successfully installed {package_name}')"]
+            try:
+                await self._exec_cmd(verify_cmd)
+                return f"Successfully installed {package_spec}"
+            except Exception as e:
+                return f"Package {package_spec} was installed, but verification failed: {str(e)}"
+                
+        except Exception as e:
+            logger.error(f"Error installing package {package_name}: {str(e)}")
+            return f"Error installing package {package_name}: {str(e)}"
 
     # HELPERS
 
