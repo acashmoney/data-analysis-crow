@@ -1,0 +1,94 @@
+# Based on the original Dockerfile.pinned but ensuring all BixBench dependencies are installed
+FROM futurehouse/bixbench:aviary-notebook-env
+
+WORKDIR /tmp
+
+# Install the missing Python packages for BixBench
+RUN pip install ldp==0.23.0 \
+                fhaviary[server]==0.18.1 \
+                crow-client==0.3.6 \
+                fh-llm-client==0.0.11 \
+                python-dotenv \
+                huggingface-hub
+
+# Copy the fhda package for installation
+COPY . /opt/fhda
+WORKDIR /opt/fhda
+# Install the package in non-editable mode for better reliability
+RUN pip install .
+
+# Return to workspace directory
+WORKDIR /workspace
+
+# Test script to verify the dependencies are correctly installed
+COPY <<'EOF' /tmp/check_deps.py
+import sys
+import importlib
+import site
+import os
+
+print("Python version:", sys.version)
+print("Python executable:", sys.executable)
+print("Site packages:", site.getsitepackages())
+
+packages = [
+    'ldp',
+    'fhda', 
+    'fhaviary',
+    'crow_client',
+    'dotenv'  # python-dotenv is imported as dotenv
+]
+
+print("\nChecking packages:")
+for pkg in packages:
+    try:
+        module = importlib.import_module(pkg)
+        if hasattr(module, '__version__'):
+            print(f"✓ {pkg} is installed (version: {module.__version__})")
+        else:
+            print(f"✓ {pkg} is installed (no version info)")
+        
+        # For ldp, check if agent module exists
+        if pkg == 'ldp' and hasattr(module, 'agent'):
+            print(f"  ✓ {pkg}.agent exists")
+        elif pkg == 'ldp':
+            print(f"  ✗ {pkg}.agent does not exist")
+            print(f"  Available attributes in {pkg}: {dir(module)[:10]}...")
+    except ImportError as e:
+        print(f"✗ {pkg} is NOT installed: {e}")
+
+# Try a more realistic import that would be used in BixBench
+print("\nTrying imports that would be used in BixBench:")
+try:
+    from ldp.agent import AgentConfig
+    print("✓ Successfully imported AgentConfig from ldp.agent")
+except ImportError as e:
+    print(f"✗ Failed to import AgentConfig from ldp.agent: {e}")
+
+try:
+    from ldp.alg.rollout import RolloutManager
+    print("✓ Successfully imported RolloutManager from ldp.alg.rollout")
+except ImportError as e:
+    print(f"✗ Failed to import RolloutManager from ldp.alg.rollout: {e}")
+
+try:
+    from fhda.data_analysis_env import DataAnalysisEnv
+    print("✓ Successfully imported DataAnalysisEnv from fhda.data_analysis_env")
+except ImportError as e:
+    print(f"✗ Failed to import DataAnalysisEnv from fhda.data_analysis_env: {e}")
+
+try:
+    from fhda.notebook_env import NBEnvironment
+    print("✓ Successfully imported NBEnvironment from fhda.notebook_env")
+except ImportError as e:
+    print(f"✗ Failed to import NBEnvironment from fhda.notebook_env: {e}")
+EOF
+
+# Run the test script during build to verify dependencies
+RUN python /tmp/check_deps.py
+
+# Add the installed dependencies to PYTHONPATH to ensure they're found
+ENV PYTHONPATH="${PYTHONPATH}:/opt/fhda"
+
+# Cleanup
+RUN rm -rf /tmp/check_deps.py
